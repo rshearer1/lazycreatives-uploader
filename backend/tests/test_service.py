@@ -49,6 +49,14 @@ def test_meta_uses_title_template(catalog):
     assert meta.title == "Sunset Dub (LazyCreatives)"
 
 
+def test_hash_cache_prunes_deleted_files(catalog, mixes_dir):
+    service.scan_mixes(catalog, [mixes_dir])
+    assert len(catalog.get_setting("hash_cache")) == 3
+    next(mixes_dir.glob("*.wav")).unlink()  # remove one render
+    service.scan_mixes(catalog, [mixes_dir])
+    assert len(catalog.get_setting("hash_cache")) == 2  # stale entry pruned
+
+
 def test_progress_events_emitted(catalog, mixes_dir):
     _connect_mock(catalog)
     mixes = service.scan_mixes(catalog, [mixes_dir])

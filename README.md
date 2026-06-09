@@ -71,6 +71,18 @@ With those set, the mock is bypassed and end-users sign in with their own SoundC
 accounts (no Pro subscription needed to *authorize* an upload). Set `LAZYUP_MOCK=1` to
 force demo mode even when credentials exist.
 
+**For distribution, don't ship the secret — use the token broker.** SoundCloud needs
+the client secret to mint tokens even with PKCE, so embedding it exposes it. Deploy the
+included [`broker/`](broker/) service (it holds the secret) and configure the app with:
+
+```
+LAZYUP_SC_CLIENT_ID=<client id>      # public, fine to embed
+LAZYUP_BROKER_URL=https://your-broker.example.com
+LAZYUP_BROKER_KEY=<shared app key>
+```
+
+The app then exchanges/refreshes tokens through the broker and **no secret ships**.
+
 > **Reality check:** SoundCloud gates API access fairly tightly. Getting the API app
 > approved is the one external dependency for going live — the code is ready either way.
 
@@ -134,10 +146,10 @@ one shared licensing service with minimal change.
   user account); the sidecar is localhost-only behind a per-launch auth token.
 - The renderer is hardened (context isolation, no node integration, navigation +
   popups blocked, CSP when packaged).
-- **Client-secret caveat:** SoundCloud requires the client secret for token
-  exchange/refresh even with PKCE, so it is embedded in the distributed build and is
-  extractable. For production, route token exchange through a small hosted broker
-  (a natural job for the planned dashboard) so the secret never ships.
+- **Client secret stays server-side.** SoundCloud requires the client secret for
+  token exchange/refresh even with PKCE. The included [`broker/`](broker/) service
+  holds it so it never ships in the desktop build; set `LAZYUP_BROKER_URL` to use it.
+  (Embedding `LAZYUP_SC_CLIENT_SECRET` directly is supported for local dev only.)
 
 ## Status
 

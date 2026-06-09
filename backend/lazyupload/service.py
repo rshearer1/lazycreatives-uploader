@@ -276,6 +276,15 @@ def _hashed(catalog: Catalog, path: str, size: int, mtime: float) -> str:
     return h
 
 
+def _prune_hash_cache(catalog: Catalog, live_paths: set[str]) -> None:
+    """Drop cached hashes for files that no longer exist, so the cache can't grow
+    without bound over time as renders are renamed/deleted."""
+    cache = catalog.get_setting(_HASH_CACHE_KEY) or {}
+    pruned = {p: v for p, v in cache.items() if p in live_paths}
+    if len(pruned) != len(cache):
+        catalog.set_setting(_HASH_CACHE_KEY, pruned)
+
+
 def scan_mixes(catalog: Catalog, sources: list[Path], progress=None) -> list[dict]:
     """Discover mixes and mark which are already on SoundCloud (by content hash)."""
     found = discover(sources)
@@ -296,6 +305,7 @@ def scan_mixes(catalog: Catalog, sources: list[Path], progress=None) -> list[dic
         if progress:
             progress({"type": "scan_progress", "done": i + 1,
                       "total": len(found), "name": m["name"]})
+    _prune_hash_cache(catalog, {m["path"] for m in found})
     if progress:
         progress({"type": "scan_done", "count": len(out)})
     return out

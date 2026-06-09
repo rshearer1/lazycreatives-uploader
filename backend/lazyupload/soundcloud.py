@@ -91,8 +91,38 @@ def _client_secret() -> str:
         return ""
 
 
+def _broker_url() -> str:
+    url = os.environ.get("LAZYUP_BROKER_URL")
+    if url:
+        return url
+    try:
+        from lazyupload._buildsecret import BROKER_URL  # type: ignore
+        return BROKER_URL or ""
+    except Exception:
+        return ""
+
+
+def _broker_key() -> str:
+    key = os.environ.get("LAZYUP_BROKER_KEY")
+    if key:
+        return key
+    try:
+        from lazyupload._buildsecret import BROKER_KEY  # type: ignore
+        return BROKER_KEY or ""
+    except Exception:
+        return ""
+
+
+def _use_broker() -> bool:
+    """Prefer the token broker when configured — it mints tokens without shipping the
+    client secret in the desktop build (see broker/)."""
+    return bool(_client_id() and _broker_url())
+
+
 def credentials_configured() -> bool:
-    return bool(_client_id() and _client_secret())
+    # Real auth needs the (public) client id plus EITHER a broker to mint tokens OR a
+    # local client secret (dev / non-distributed).
+    return bool(_client_id() and (_broker_url() or _client_secret()))
 
 
 def use_mock() -> bool:
@@ -132,34 +162,53 @@ def authorize_url(redirect_uri: str, state: str, code_challenge: str) -> str:
 
 
 # ---- token exchange ---------------------------------------------------------
-def _token_request(payload: dict) -> dict:
-    r = requests.post(f"{AUTH_BASE}/oauth/token", data=payload, timeout=20,
-                      headers={"Accept": "application/json"})
-    _raise_for_status(r)
-    body = r.json()
-    # Normalise to an absolute expiry so callers don't have to track request time.
-    body["expires_at"] = time.time() + int(body.get("expires_in", 3600)) - 60  # 60s skew
+def _normalize(body: dict) -> dict:
+    # Absolute expiry so callers don't have to track request time. 60s skew.
+    body["expires_at"] = time.time() + int(body.get("expires_in", 3600)) - 60
     return body
 
 
+def _direct_token(payload: dict) -> dict:
+    """Talk to SoundCloud's token endpoint directly (needs the client secret)."""
+    r = requests.post(f"{AUTH_BASE}/oauth/token", data=payload, timeout=20,
+                      headers={"Accept": "application/json"})
+    _raise_for_status(r)
+    return r.json()
+
+
+def _broker_post(path: str, payload: dict) -> dict:
+    """Mint tokens via the broker, which holds the client secret server-side."""
+    headers = {"Accept": "application/json"}
+    if _broker_key():
+        headers["X-App-Key"] = _broker_key()
+    r = requests.post(_broker_url().rstrip("/") + path, json=payload, timeout=20, headers=headers)
+    _raise_for_status(r)
+    return r.json()
+
+
 def exchange_code(code: str, redirect_uri: str, code_verifier: str) -> dict:
-    return _token_request({
+    if _use_broker():
+        return _normalize(_broker_post("/exchange", {
+            "code": code, "redirect_uri": redirect_uri, "code_verifier": code_verifier}))
+    return _normalize(_direct_token({
         "grant_type": "authorization_code",
         "client_id": _client_id(),
         "client_secret": _client_secret(),
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
         "code": code,
-    })
+    }))
 
 
 def refresh_tokens(refresh_token: str) -> dict:
-    return _token_request({
+    if _use_broker():
+        return _normalize(_broker_post("/refresh", {"refresh_token": refresh_token}))
+    return _normalize(_direct_token({
         "grant_type": "refresh_token",
         "client_id": _client_id(),
         "client_secret": _client_secret(),
         "refresh_token": refresh_token,
-    })
+    }))
 
 
 # ---- file wrapper for real upload progress ----------------------------------
@@ -291,14 +340,22 @@ class SoundCloudClient:
             pf.close()
 
     # ---- manage existing uploads -------------------------------------------
-    def list_tracks(self, limit: int = 200) -> list[dict]:
-        """Every track on the connected account (normalized)."""
-        r = requests.get(f"{API_BASE}/me/tracks", headers=self._headers(),
-                         params={"limit": limit, "linked_partitioning": "false"}, timeout=30)
-        _raise_for_status(r)
-        body = r.json()
-        items = body.get("collection", body) if isinstance(body, dict) else body
-        return [normalize_track(t) for t in items]
+    def list_tracks(self, page: int = 50, max_total: int = 1000) -> list[dict]:
+        """Every track on the connected account (normalized), paginated so large
+        libraries aren't silently truncated. Follows SoundCloud's next_href, bounded
+        by max_total so a huge account can't stall the UI."""
+        out: list[dict] = []
+        url = f"{API_BASE}/me/tracks"
+        params: dict | None = {"limit": page, "linked_partitioning": "true"}
+        while url and len(out) < max_total:
+            r = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            _raise_for_status(r)
+            body = r.json()
+            items = body.get("collection", []) if isinstance(body, dict) else body
+            out.extend(normalize_track(t) for t in items)
+            url = body.get("next_href") if isinstance(body, dict) else None
+            params = None  # next_href already carries the cursor + params
+        return out[:max_total]
 
     def update_track(self, track_id: int, fields: dict) -> dict:
         """Edit metadata / privacy on an existing track. `fields` may contain
