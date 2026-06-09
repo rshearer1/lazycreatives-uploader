@@ -6,7 +6,7 @@
   "main": "electron/main.js",
   "scripts": {
     "dev:vite": "vite",
-    "dev:electron": "wait-on tcp:5173 && cross-env ELECTRON_RUN_AS_NODE= LAZYUP_DEV=1 LAZYUP_MOCK=1 electron .",
+    "dev:electron": "wait-on tcp:5173 && cross-env LAZYUP_DEV=1 LAZYUP_MOCK=1 node scripts/run-electron.js",
     "start": "concurrently -k -n VITE,ELECTRON -c blue,green \"npm:dev:vite\" \"npm:dev:electron\"",
     "build": "vite build",
     "build:py": "cd ../backend && .venv/Scripts/pyinstaller sidecar.spec --noconfirm --distpath dist",
