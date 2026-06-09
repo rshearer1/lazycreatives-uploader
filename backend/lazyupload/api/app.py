@@ -12,7 +12,8 @@ from lazyupload import entitlement, service, soundcloud
 from lazyupload.api.auth import require_token, ws_token_ok
 from lazyupload.api.progress import ProgressHub
 from lazyupload.api.schemas import (
-    ActivateRequest, Config, ScanRequest, TrackUpdate, UploadRequest,
+    AccountActivateRequest, ActivateRequest, Config, DisconnectRequest, ScanRequest,
+    TrackUpdate, UploadRequest,
 )
 from lazyupload.catalog import Catalog
 from lazyupload.connect import SoundCloudConnectSession
@@ -114,6 +115,8 @@ def create_app(token: str, db_path: Path) -> FastAPI:
     def put_settings(config: Config) -> Config:
         if config.interval_minutes > 0 and not _allows("auto_upload"):
             config.interval_minutes = 0  # auto-upload (watch folder) is Pro-only
+        if config.templates and not _allows("metadata_templates"):
+            config.templates = []        # saved templates are Pro-only
         catalog.set_setting("config", config.model_dump())
         scheduler.set_interval(config.interval_minutes)
         return config
@@ -123,6 +126,8 @@ def create_app(token: str, db_path: Path) -> FastAPI:
     def account():
         return {"connected": service.connected(catalog),
                 "account": service.account_label(catalog),
+                "accounts": service.accounts_public(catalog),
+                "multi": _allows("multi_account"),
                 "mock": soundcloud.use_mock()}
 
     @app.post("/api/connect", dependencies=[Depends(require_token)])
@@ -134,8 +139,11 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         while len(sessions) >= _CONNECT_CAP:
             sessions.pop(next(iter(sessions)))
 
+        # Pro can connect several accounts; Free's connect replaces the existing one.
+        allow_multiple = _allows("multi_account")
+
         def on_connected(tokens: dict):
-            service.save_account(catalog, tokens)
+            service.add_account(catalog, tokens, allow_multiple=allow_multiple)
 
         sess = SoundCloudConnectSession(on_connected)
         sess.start()
@@ -154,13 +162,21 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         return {"status": sess.status, "account": service.account_label(catalog),
                 "error": sess.error}
 
+    @app.post("/api/accounts/activate", dependencies=[Depends(require_token)])
+    def activate_account(req: AccountActivateRequest):
+        if not service.set_active(catalog, req.id):
+            raise HTTPException(status_code=404, detail="Unknown account.")
+        return {"connected": service.connected(catalog),
+                "account": service.account_label(catalog),
+                "accounts": service.accounts_public(catalog)}
+
     @app.post("/api/disconnect", dependencies=[Depends(require_token)])
-    def disconnect():
-        acct = service.get_account(catalog) or {}
-        if not soundcloud.use_mock() and acct.get("refresh_token"):
-            pass  # SoundCloud has no token-revoke endpoint; dropping the tokens is enough
-        service.clear_account(catalog)
-        return {"connected": False, "account": None}
+    def disconnect(req: DisconnectRequest):
+        # SoundCloud has no token-revoke endpoint; dropping the stored tokens is enough.
+        service.remove_account(catalog, req.id)
+        return {"connected": service.connected(catalog),
+                "account": service.account_label(catalog),
+                "accounts": service.accounts_public(catalog)}
 
     # ---- scan ---------------------------------------------------------------
     @app.post("/api/scan", dependencies=[Depends(require_token)])
@@ -178,7 +194,7 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         return {"mixes": mixes}
 
     # ---- upload -------------------------------------------------------------
-    async def _run_job(job_id, items, defaults, force):
+    async def _run_job(job_id, items, defaults, force, release_at):
         cancel = app.state.cancels[job_id]
 
         def progress(ev):
@@ -187,7 +203,7 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         try:
             result = await asyncio.to_thread(
                 service.run_upload, catalog, items, defaults, progress,
-                cancel.is_set, force)
+                cancel.is_set, force, release_at)
             app.state.jobs[job_id] = {"state": "done", "result": result}
         except Exception as e:  # pragma: no cover - defensive
             app.state.jobs[job_id] = {"state": "error", "error": str(e)}
@@ -204,9 +220,9 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         if len(items) > 1 and not _allows("batch"):
             raise HTTPException(status_code=402,
                                 detail="Uploading more than one mix at once is a Pro feature.")
-        # Any item asking for private release uses scheduled/controlled release —
-        # keep the simple public/private choice free; only gate it if you later add
-        # timed flips. For now sharing is unrestricted.
+        if req.release_at and not _allows("schedule_release"):
+            raise HTTPException(status_code=402,
+                                detail="Scheduled public release is a Pro feature.")
         saved = catalog.get_setting("config") or {}
         defaults = {
             "sharing": saved.get("default_sharing", "public"),
@@ -220,7 +236,7 @@ def create_app(token: str, db_path: Path) -> FastAPI:
         job_id = uuid.uuid4().hex
         _new_job(job_id)
         app.state.cancels[job_id] = threading.Event()
-        asyncio.create_task(_run_job(job_id, items, defaults, req.force))
+        asyncio.create_task(_run_job(job_id, items, defaults, req.force, req.release_at))
         return {"job_id": job_id, "state": "running"}
 
     @app.get("/api/jobs/{job_id}", dependencies=[Depends(require_token)])

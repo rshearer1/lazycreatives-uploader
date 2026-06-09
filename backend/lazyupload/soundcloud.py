@@ -36,6 +36,37 @@ API_BASE = "https://api.soundcloud.com"
 DEFAULT_REDIRECT_PORT = 8765
 DEFAULT_REDIRECT_URI = f"http://127.0.0.1:{DEFAULT_REDIRECT_PORT}/callback"
 
+# Upload: cap the time spent connecting / waiting on the server so a stalled socket
+# can't hang the worker forever. The read timeout is per-read, not total, so it
+# tolerates a long large-file transfer while still failing a dead connection.
+_UPLOAD_TIMEOUT = (15, 900)
+
+
+class SoundCloudError(Exception):
+    """Base for friendly, user-facing SoundCloud failures."""
+
+
+class RateLimitError(SoundCloudError):
+    def __init__(self, retry_after: str | None = None):
+        self.retry_after = retry_after
+        hint = f" Try again in {retry_after}s." if retry_after else " Try again shortly."
+        super().__init__("SoundCloud is rate-limiting uploads." + hint)
+
+
+class AuthError(SoundCloudError):
+    """The account's authorization was rejected — it needs reconnecting."""
+    def __init__(self):
+        super().__init__("SoundCloud rejected the account — please reconnect it.")
+
+
+def _raise_for_status(r) -> None:
+    """Turn HTTP errors into friendly, typed exceptions (esp. 429 / auth)."""
+    if r.status_code == 429:
+        raise RateLimitError(r.headers.get("Retry-After"))
+    if r.status_code in (401, 403):
+        raise AuthError()
+    r.raise_for_status()
+
 
 # ---- credentials ------------------------------------------------------------
 def _client_id() -> str:
@@ -104,7 +135,7 @@ def authorize_url(redirect_uri: str, state: str, code_challenge: str) -> str:
 def _token_request(payload: dict) -> dict:
     r = requests.post(f"{AUTH_BASE}/oauth/token", data=payload, timeout=20,
                       headers={"Accept": "application/json"})
-    r.raise_for_status()
+    _raise_for_status(r)
     body = r.json()
     # Normalise to an absolute expiry so callers don't have to track request time.
     body["expires_at"] = time.time() + int(body.get("expires_in", 3600)) - 60  # 60s skew
@@ -233,7 +264,7 @@ class SoundCloudClient:
 
     def me(self) -> dict:
         r = requests.get(f"{API_BASE}/me", headers=self._headers(), timeout=20)
-        r.raise_for_status()
+        _raise_for_status(r)
         return r.json()
 
     def upload(self, file_path: str, meta, on_progress=None) -> dict:
@@ -253,8 +284,8 @@ class SoundCloudClient:
         try:
             files = {"track[asset_data]": (path.name, pf, "application/octet-stream")}
             r = requests.post(f"{API_BASE}/tracks", headers=self._headers(),
-                              data=data, files=files, timeout=None)
-            r.raise_for_status()
+                              data=data, files=files, timeout=_UPLOAD_TIMEOUT)
+            _raise_for_status(r)
             return r.json()
         finally:
             pf.close()
@@ -264,7 +295,7 @@ class SoundCloudClient:
         """Every track on the connected account (normalized)."""
         r = requests.get(f"{API_BASE}/me/tracks", headers=self._headers(),
                          params={"limit": limit, "linked_partitioning": "false"}, timeout=30)
-        r.raise_for_status()
+        _raise_for_status(r)
         body = r.json()
         items = body.get("collection", body) if isinstance(body, dict) else body
         return [normalize_track(t) for t in items]
@@ -280,12 +311,12 @@ class SoundCloudClient:
             data["track[tag_list]"] = _tag_list(fields["tags"])
         r = requests.put(f"{API_BASE}/tracks/{track_id}", headers=self._headers(),
                          data=data, timeout=30)
-        r.raise_for_status()
+        _raise_for_status(r)
         return normalize_track(r.json())
 
     def delete_track(self, track_id: int) -> None:
         r = requests.delete(f"{API_BASE}/tracks/{track_id}", headers=self._headers(), timeout=30)
-        r.raise_for_status()
+        _raise_for_status(r)
 
 
 # ---- the mock client --------------------------------------------------------

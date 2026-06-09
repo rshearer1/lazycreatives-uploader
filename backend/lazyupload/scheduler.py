@@ -11,9 +11,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from lazyupload import entitlement
 from lazyupload.catalog import Catalog
-from lazyupload.service import run_upload, scan_mixes, upload_in_progress
+from lazyupload.service import (
+    process_due_releases, run_upload, scan_mixes, upload_in_progress,
+)
 
 _JOB_ID = "auto_upload"
+_RELEASE_JOB_ID = "release_checker"
 
 
 class UploadScheduler:
@@ -22,6 +25,21 @@ class UploadScheduler:
         self._hub = hub  # scheduled runs stream progress + fire the completion toast
         self._scheduler = BackgroundScheduler()
         self._scheduler.start(paused=False)
+        # Always-on, cheap check that flips any due scheduled releases to public.
+        self._scheduler.add_job(self._process_releases, "interval", seconds=60,
+                                id=_RELEASE_JOB_ID)
+
+    def _process_releases(self) -> None:
+        try:
+            flipped = process_due_releases(self._catalog)
+        except Exception:
+            return
+        if flipped and self._hub is not None:
+            try:
+                self._hub.publish_threadsafe(
+                    {"type": "releases_published", "count": len(flipped)})
+            except RuntimeError:
+                pass
 
     def set_interval(self, minutes: int) -> None:
         existing = self._scheduler.get_job(_JOB_ID)
@@ -54,9 +72,10 @@ class UploadScheduler:
         fresh = [m for m in mixes if not m.get("uploaded")]
         if not fresh:
             return
-        # Auto runs respect the configured defaults (sharing/genre/tags/template).
+        # Auto runs respect the configured defaults, but default to PRIVATE sharing so
+        # hands-off automation never publishes a render publicly without opt-in.
         defaults = {
-            "sharing": config.get("default_sharing", "public"),
+            "sharing": config.get("auto_upload_sharing", "private"),
             "genre": config.get("default_genre", ""),
             "tags": config.get("default_tags", []),
             "title_template": config.get("title_template", "{name}"),

@@ -1,5 +1,6 @@
 """Uvicorn entrypoint for the uploader sidecar (configured via environment)."""
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,14 +26,40 @@ def read_config() -> dict:
     }
 
 
-def _parent_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.windll.kernel32
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _STILL_ACTIVE = 259
+
+    def _parent_alive(pid: int) -> bool:
+        """Whether process `pid` is still running, on Windows.
+
+        os.kill(pid, 0) is NOT a safe liveness probe here — signal 0 maps to
+        CTRL_C_EVENT semantics, not a no-op probe. Use OpenProcess + the exit code
+        instead so a hard-killed Electron reliably takes the sidecar down with it.
+        """
+        h = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False  # can't open our own parent -> it's gone
+        try:
+            code = wintypes.DWORD()
+            if not _kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return True  # query failed; err toward "alive" so we don't exit early
+            return code.value == _STILL_ACTIVE
+        finally:
+            _kernel32.CloseHandle(h)
+else:
+    def _parent_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)  # signal 0 *is* a valid liveness probe on POSIX
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
         return True
-    return True
 
 
 def install_parent_watchdog(parent_pid, *, poll_interval=2.0, on_dead=None,

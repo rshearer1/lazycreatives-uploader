@@ -2,12 +2,14 @@
 account, and the dashboard overview. The API and CLI call into here; this module
 holds no FastAPI/HTTP concerns so it's trivially unit-testable.
 """
+import json
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-from lazyupload import soundcloud
+from lazyupload import crypto, soundcloud
 from lazyupload.catalog import Catalog
 from lazyupload.hashing import hash_file
 from lazyupload.models import TrackMeta, UploadResult
@@ -18,8 +20,10 @@ from lazyupload.scanner import discover
 _upload_lock = threading.Lock()
 _uploading = False
 
-_ACCOUNT_KEY = "sc_account"      # persisted OAuth tokens for the connected account
-_HASH_CACHE_KEY = "hash_cache"   # {path: {size, mtime, hash}} so scans don't re-hash
+_LEGACY_ACCOUNT_KEY = "sc_account"  # single-account storage from before multi-account
+_ACCOUNTS_KEY = "sc_accounts"       # list of stored, encrypted account entries
+_ACTIVE_KEY = "sc_active"           # id of the currently active account
+_HASH_CACHE_KEY = "hash_cache"      # {path: {size, mtime, hash}} so scans don't re-hash
 
 
 def default_timestamp() -> str:
@@ -30,29 +34,122 @@ def upload_in_progress() -> bool:
     return _uploading
 
 
-# ---- connected account ------------------------------------------------------
+# ---- connected accounts (encrypted, multi-account) --------------------------
+# Each account is a full token dict plus an "id". On disk it's an entry of the form
+# {"id", "username", "mock", "enc"} where `enc` is the DPAPI-encrypted token JSON;
+# id/username/mock are kept in clear for listing without decrypting every account.
+def _migrate_legacy(catalog: Catalog) -> None:
+    """One-time: fold a pre-multi-account `sc_account` into the new list."""
+    legacy = catalog.get_setting(_LEGACY_ACCOUNT_KEY)
+    if legacy and not catalog.get_setting(_ACCOUNTS_KEY):
+        acct = dict(legacy)
+        acct.setdefault("id", uuid.uuid4().hex)
+        _write_accounts(catalog, [acct])
+        catalog.set_setting(_ACTIVE_KEY, acct["id"])
+    if legacy is not None:
+        catalog.delete_setting(_LEGACY_ACCOUNT_KEY)
+
+
+def _write_accounts(catalog: Catalog, accts: list[dict]) -> None:
+    stored = [{"id": a["id"], "username": a.get("username"), "mock": a.get("mock", False),
+               "enc": crypto.encrypt(json.dumps(a))} for a in accts]
+    catalog.set_setting(_ACCOUNTS_KEY, stored)
+
+
+def get_accounts(catalog: Catalog) -> list[dict]:
+    """All connected accounts as full (decrypted) dicts, newest last."""
+    _migrate_legacy(catalog)
+    out = []
+    for s in catalog.get_setting(_ACCOUNTS_KEY) or []:
+        try:
+            out.append(json.loads(crypto.decrypt(s["enc"])))
+        except Exception:
+            continue  # unreadable (e.g. DPAPI blob from another user) — skip it
+    return out
+
+
+def active_account(catalog: Catalog) -> dict | None:
+    accts = get_accounts(catalog)
+    if not accts:
+        return None
+    aid = catalog.get_setting(_ACTIVE_KEY)
+    return next((a for a in accts if a.get("id") == aid), accts[0])
+
+
+def add_account(catalog: Catalog, tokens: dict, allow_multiple: bool = False) -> dict:
+    """Add (or, on Free, replace) a connected account and make it active. Reconnecting
+    the same SoundCloud user updates that account rather than duplicating it."""
+    acct = dict(tokens)
+    acct["id"] = uuid.uuid4().hex
+    accts = get_accounts(catalog) if allow_multiple else []
+    uid = acct.get("user_id")
+    if uid is not None:
+        accts = [a for a in accts if a.get("user_id") != uid]  # dedupe same SC user
+    accts.append(acct)
+    _write_accounts(catalog, accts)
+    catalog.set_setting(_ACTIVE_KEY, acct["id"])
+    return acct
+
+
+def set_active(catalog: Catalog, account_id: str) -> bool:
+    if any(a.get("id") == account_id for a in get_accounts(catalog)):
+        catalog.set_setting(_ACTIVE_KEY, account_id)
+        return True
+    return False
+
+
+def remove_account(catalog: Catalog, account_id: str | None = None) -> None:
+    accts = get_accounts(catalog)
+    target = account_id or (active_account(catalog) or {}).get("id")
+    remaining = [a for a in accts if a.get("id") != target]
+    _write_accounts(catalog, remaining)
+    if catalog.get_setting(_ACTIVE_KEY) == target:
+        catalog.set_setting(_ACTIVE_KEY, remaining[0]["id"] if remaining else None)
+
+
+def _update_active_tokens(catalog: Catalog, new_tokens: dict) -> None:
+    """Persist refreshed tokens back onto the active account (refresh tokens rotate)."""
+    accts = get_accounts(catalog)
+    aid = (active_account(catalog) or {}).get("id")
+    for a in accts:
+        if a.get("id") == aid:
+            a.update(new_tokens)
+            a["id"] = aid
+    _write_accounts(catalog, accts)
+
+
+# Back-compat single-account helpers (used by the CLI and tests).
 def get_account(catalog: Catalog) -> dict | None:
-    return catalog.get_setting(_ACCOUNT_KEY)
+    return active_account(catalog)
 
 
 def save_account(catalog: Catalog, tokens: dict) -> None:
-    catalog.set_setting(_ACCOUNT_KEY, tokens)
+    add_account(catalog, tokens, allow_multiple=False)
 
 
 def clear_account(catalog: Catalog) -> None:
-    catalog.delete_setting(_ACCOUNT_KEY)
+    catalog.set_setting(_ACCOUNTS_KEY, [])
+    catalog.set_setting(_ACTIVE_KEY, None)
 
 
 def connected(catalog: Catalog) -> bool:
+    acct = active_account(catalog) or {}
     if soundcloud.use_mock():
-        return get_account(catalog) is not None  # mock still requires an explicit connect
-    acct = get_account(catalog) or {}
+        return bool(acct)  # mock still requires an explicit connect
     return bool(acct.get("access_token"))
 
 
 def account_label(catalog: Catalog) -> str | None:
-    acct = get_account(catalog) or {}
+    acct = active_account(catalog) or {}
     return acct.get("username") or acct.get("permalink") or None
+
+
+def accounts_public(catalog: Catalog) -> list[dict]:
+    """Account list for the UI — no tokens, just id/username/active flag."""
+    aid = (active_account(catalog) or {}).get("id")
+    return [{"id": a.get("id"), "username": a.get("username") or "SoundCloud",
+             "mock": a.get("mock", False), "active": a.get("id") == aid}
+            for a in get_accounts(catalog)]
 
 
 class _MockStore:
@@ -75,10 +172,10 @@ def client_for(catalog: Catalog):
 
     Refresh tokens are single-use, so the on_tokens callback re-saves the account
     every time the access token is renewed."""
-    tokens = get_account(catalog) or {}
+    tokens = active_account(catalog) or {}
 
     def on_tokens(new: dict):
-        save_account(catalog, new)
+        _update_active_tokens(catalog, new)
 
     return soundcloud.get_client(tokens, on_tokens, store=_MockStore(catalog))
 
@@ -100,6 +197,69 @@ def delete_track(catalog: Catalog, track_id: int) -> None:
     if not connected(catalog):
         raise RuntimeError("not_connected")
     client_for(catalog).delete_track(track_id)
+
+
+def client_for_account(catalog: Catalog, account_id: str):
+    """A client bound to a SPECIFIC account (used to flip scheduled releases on the
+    account that originally uploaded them, even if the user has since switched)."""
+    accts = get_accounts(catalog)
+    acct = next((a for a in accts if a.get("id") == account_id), None)
+    if acct is None:
+        return None
+
+    def on_tokens(new: dict):
+        for a in accts:
+            if a.get("id") == account_id:
+                a.update(new)
+                a["id"] = account_id
+        _write_accounts(catalog, accts)
+
+    return soundcloud.get_client(acct, on_tokens, store=_MockStore(catalog))
+
+
+# ---- scheduled release (upload private now, flip public later) --------------
+_RELEASES_KEY = "pending_releases"
+
+
+def add_pending_release(catalog: Catalog, track_id, release_at: str,
+                        account_id: str | None, title: str = "") -> None:
+    pending = catalog.get_setting(_RELEASES_KEY) or []
+    pending.append({"id": uuid.uuid4().hex, "track_id": track_id,
+                    "release_at": release_at, "account_id": account_id, "title": title})
+    catalog.set_setting(_RELEASES_KEY, pending)
+
+
+def pending_releases(catalog: Catalog) -> list[dict]:
+    return catalog.get_setting(_RELEASES_KEY) or []
+
+
+def process_due_releases(catalog: Catalog, now: datetime | None = None) -> list[dict]:
+    """Flip any releases whose time has come to public. Returns the ones flipped;
+    failures are kept to retry on the next tick."""
+    now = now or datetime.now()
+    pending = catalog.get_setting(_RELEASES_KEY) or []
+    if not pending:
+        return []
+    remaining, flipped = [], []
+    for p in pending:
+        try:
+            due = datetime.fromisoformat(p["release_at"]) <= now
+        except (ValueError, KeyError, TypeError):
+            due = True  # malformed -> release now rather than getting stuck
+        if not due:
+            remaining.append(p)
+            continue
+        client = client_for_account(catalog, p.get("account_id")) if p.get("account_id") \
+            else (client_for(catalog) if connected(catalog) else None)
+        if client is None:
+            continue  # the account is gone — drop the orphaned release
+        try:
+            client.update_track(p["track_id"], {"sharing": "public"})
+            flipped.append(p)
+        except Exception:
+            remaining.append(p)  # transient (rate limit / network) — retry next tick
+    catalog.set_setting(_RELEASES_KEY, remaining)
+    return flipped
 
 
 # ---- scan with dedupe -------------------------------------------------------
@@ -160,12 +320,15 @@ def _meta_for(item: dict, defaults: dict) -> TrackMeta:
 
 
 def run_upload(catalog: Catalog, items: list[dict], defaults: dict | None = None,
-               progress=None, cancel=None, force: bool = False) -> dict:
+               progress=None, cancel=None, force: bool = False,
+               release_at: str | None = None) -> dict:
     """Upload each item to SoundCloud, skipping anything already published (by hash).
 
     `items`  : [{path, title?, description?, sharing?, genre?, tags?}, ...]
     `defaults`: fallback metadata from config (sharing/genre/tags/title_template).
     `cancel` : a callable returning True to stop between tracks.
+    `release_at`: if set, each track is uploaded PRIVATE and a pending release is
+                  recorded to flip it public at that ISO time (scheduled release).
     Returns a summary dict; emits live progress events through `progress`.
     """
     global _uploading
@@ -207,6 +370,8 @@ def run_upload(catalog: Catalog, items: list[dict], defaults: dict | None = None
                           "reason": "duplicate"})
                     continue
                 meta = _meta_for(item, defaults)
+                if release_at:
+                    meta.sharing = "private"  # publish privately, flip public later
 
                 def on_prog(sent, tot, _i=i, _n=name):
                     emit({"type": "track_progress", "index": _i, "name": _n,
@@ -215,6 +380,9 @@ def run_upload(catalog: Catalog, items: list[dict], defaults: dict | None = None
                 track = client.upload(path, meta, on_progress=on_prog)
                 tid = track.get("id")
                 url = track.get("permalink_url")
+                if release_at and tid is not None:
+                    add_pending_release(catalog, tid, release_at,
+                                        (active_account(catalog) or {}).get("id"), meta.title)
                 catalog.record_upload(
                     title=meta.title, file_path=path, file_hash=h, size=size,
                     sharing=meta.sharing, status="uploaded", timestamp=default_timestamp(),
@@ -257,4 +425,5 @@ def build_overview(catalog: Catalog) -> dict:
         "uploaded_bytes": t["uploaded_bytes"],
         "last_upload": (last or {}).get("timestamp"),
         "last_upload_ok": bool(last and last.get("status") == "uploaded"),
+        "scheduled_count": len(pending_releases(catalog)),
     }
