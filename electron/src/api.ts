@@ -36,12 +36,13 @@ export function makeApi() {
     async connectStatus(id: string): Promise<{ status: "pending" | "connected" | "failed"; account: string | null; error: string | null }> {
       return req("GET", `/api/connect/${id}`);
     },
-    async disconnect(): Promise<{ connected: boolean }> { return req("POST", "/api/disconnect"); },
+    async activateAccount(id: string): Promise<Account> { return req("POST", "/api/accounts/activate", { id }); },
+    async disconnect(id?: string): Promise<Account> { return req("POST", "/api/disconnect", { id: id ?? null }); },
     async scan(sources?: string[]): Promise<Mix[]> {
       return (await req("POST", "/api/scan", { sources })).mixes;
     },
-    async upload(items: UploadItemInput[], force = false): Promise<{ job_id: string }> {
-      return req("POST", "/api/upload", { items, force });
+    async upload(items: UploadItemInput[], force = false, releaseAt?: string): Promise<{ job_id: string }> {
+      return req("POST", "/api/upload", { items, force, release_at: releaseAt ?? null });
     },
     async jobStatus(id: string): Promise<JobStatus> { return req("GET", `/api/jobs/${id}`); },
     async cancelJob(id: string): Promise<{ cancelling: boolean }> { return req("POST", `/api/jobs/${id}/cancel`); },
@@ -69,4 +70,10 @@ export function revealPath(p: string) {
 }
 export async function pickFolder(): Promise<string | null> {
   return (window as any).lazyupload?.pickFolder?.() ?? null;
+}
+export async function getOpenAtLogin(): Promise<boolean> {
+  return (window as any).lazyupload?.getOpenAtLogin?.() ?? false;
+}
+export async function setOpenAtLogin(enabled: boolean): Promise<boolean> {
+  return (window as any).lazyupload?.setOpenAtLogin?.(enabled) ?? false;
 }

@@ -1,13 +1,13 @@
 import { useRef, useState } from "react";
 import { makeApi, openExternal } from "../api";
 import type { Account } from "../types";
-import { Button } from "./ui";
+import { Button, ProBadge } from "./ui";
 
 const api = makeApi();
 
-// Drives the SoundCloud sign-in: POST /api/connect, open the browser to the auth
-// URL (skipped in mock mode, which connects instantly), then poll until the
-// loopback callback completes. Reused by Setup, Home and Settings.
+// Drives SoundCloud sign-in and (Pro) multi-account management. POST /api/connect,
+// open the browser to the auth URL (skipped in mock mode, which connects instantly),
+// then poll until the loopback callback completes. Reused by Setup, Home, Settings.
 export function ConnectPanel({ account, onChange }: {
   account: Account; onChange: (a: Account) => void;
 }) {
@@ -21,7 +21,6 @@ export function ConnectPanel({ account, onChange }: {
       const { connect_id, auth_url, status } = await api.connect();
       if (auth_url) openExternal(auth_url);
       if (status === "connected") return finish();
-      // poll the loopback callback result
       const deadline = Date.now() + 300_000;
       const tick = async () => {
         try {
@@ -44,29 +43,45 @@ export function ConnectPanel({ account, onChange }: {
     onChange(await api.account());
   }
 
-  async function disconnect() {
-    await api.disconnect();
-    onChange(await api.account());
-  }
+  async function switchTo(id: string) { onChange(await api.activateAccount(id)); }
+  async function disconnect(id: string) { onChange(await api.disconnect(id)); }
 
-  if (account.connected) {
-    return (
-      <div className="row-spread">
-        <div>
-          <span className="pill pill--ok">● Connected</span>{" "}
-          <b>{account.account || "SoundCloud"}</b>
-          {account.mock && <span className="pill" style={{ marginLeft: 8 }}>demo mode</span>}
-        </div>
-        <Button sm onClick={disconnect}>Disconnect</Button>
-      </div>
-    );
-  }
+  const accounts = account.accounts || [];
+
   return (
     <div>
-      <Button kind="sc" onClick={start} disabled={busy}>
-        {busy ? "Waiting for browser…" : account.mock ? "Connect (demo account)" : "Connect SoundCloud"}
-      </Button>
-      {account.mock && (
+      {accounts.length > 0 && (
+        <div className="stack" style={{ marginBottom: 12 }}>
+          {accounts.map((a) => (
+            <div key={a.id} className="row" style={{ marginBottom: 0 }}>
+              <span className={`pill ${a.active ? "pill--ok" : ""}`}>{a.active ? "● active" : "idle"}</span>
+              <div className="row__main">
+                <div className="row__title">{a.username}</div>
+                {a.mock && <div className="row__sub">demo account</div>}
+              </div>
+              {!a.active && account.multi &&
+                <Button sm onClick={() => switchTo(a.id)}>Switch to</Button>}
+              <Button kind="danger" sm onClick={() => disconnect(a.id)}>Disconnect</Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(accounts.length === 0 || account.multi) && (
+        <Button kind="sc" onClick={start} disabled={busy}>
+          {busy ? "Waiting for browser…"
+            : accounts.length === 0
+              ? (account.mock ? "Connect (demo account)" : "Connect SoundCloud")
+              : <>Add another account{!account.multi && <ProBadge />}</>}
+        </Button>
+      )}
+      {accounts.length > 0 && !account.multi && (
+        <div className="locked-note">
+          <span>Connecting more than one SoundCloud account is</span><b>Pro<ProBadge /></b>
+        </div>
+      )}
+
+      {account.mock && accounts.length === 0 && (
         <div className="sub" style={{ margin: "8px 0 0", fontSize: 12 }}>
           No SoundCloud API credentials configured yet — connecting uses a built-in
           demo account so you can try the whole flow offline.

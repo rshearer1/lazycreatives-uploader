@@ -10,6 +10,8 @@ export interface Config {
   title_template: string;
   default_description: string;
   downloadable: boolean;
+  auto_upload_sharing: Sharing;
+  templates: MetadataTemplate[];
 }
 
 export interface Mix {
@@ -24,10 +26,29 @@ export interface Mix {
   permalink_url: string | null;
 }
 
+export interface AccountSummary {
+  id: string;
+  username: string;
+  mock: boolean;
+  active: boolean;
+}
+
 export interface Account {
   connected: boolean;
   account: string | null;
+  accounts: AccountSummary[];
+  multi: boolean;
   mock: boolean;
+}
+
+export interface MetadataTemplate {
+  name: string;
+  title_template: string;
+  description: string;
+  genre: string;
+  tags: string[];
+  sharing: Sharing;
+  downloadable: boolean;
 }
 
 export interface Overview {
@@ -39,6 +60,7 @@ export interface Overview {
   uploaded_bytes: number;
   last_upload: string | null;
   last_upload_ok: boolean;
+  scheduled_count: number;
   tier: Tier;
   schedule: { enabled: boolean; interval_minutes: number; next_run?: string | null };
 }

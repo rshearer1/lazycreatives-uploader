@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { makeApi, openExternal } from "../api";
-import type { Entitlement, Mix, Sharing } from "../types";
+import type { Config, Entitlement, Mix, Sharing, UploadItemInput } from "../types";
 import { Button, fmtBytes, fmtDuration, ProBadge, ProgressBar } from "../components/ui";
 import type { UploadState, ScanState } from "../useProgress";
 
 const api = makeApi();
 
-export function Upload({ ent, scan, upload, resetUpload }: {
-  ent: Entitlement; scan: ScanState; upload: UploadState; resetUpload: () => void;
+export function Upload({ cfg, ent, scan, upload, resetUpload }: {
+  cfg: Config; ent: Entitlement; scan: ScanState; upload: UploadState; resetUpload: () => void;
 }) {
   const [mixes, setMixes] = useState<Mix[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [sharing, setSharing] = useState<Sharing>("public");
+  const [templateName, setTemplateName] = useState("");
+  const [scheduleOn, setScheduleOn] = useState(false);
+  const [releaseAtValue, setReleaseAtValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const pollRef = useRef<number | null>(null);
@@ -46,11 +49,22 @@ export function Upload({ ent, scan, upload, resetUpload }: {
   async function start() {
     if (selected.size === 0) return;
     setError(null); resetUpload(); setRunning(true);
-    const items = (mixes || [])
+    const tmpl = cfg.templates.find((t) => t.name === templateName);
+    const items: UploadItemInput[] = (mixes || [])
       .filter((m) => selected.has(m.path))
-      .map((m) => ({ path: m.path, name: m.name, sharing, file_hash: m.file_hash, size: m.size }));
+      .map((m) => ({
+        path: m.path, name: m.name,
+        title: tmpl ? tmpl.title_template.replace("{name}", m.name) : undefined,
+        sharing: tmpl ? tmpl.sharing : sharing,
+        genre: tmpl?.genre || undefined,
+        tags: tmpl && tmpl.tags.length ? tmpl.tags : undefined,
+        description: tmpl?.description || undefined,
+        file_hash: m.file_hash, size: m.size,
+      }));
+    const releaseAt = scheduleOn && releaseAtValue
+      ? new Date(releaseAtValue).toISOString() : undefined;
     try {
-      const { job_id } = await api.upload(items);
+      const { job_id } = await api.upload(items, false, releaseAt);
       // The live WS stream drives the UI; poll the job only to surface a hard error.
       const tick = async () => {
         const job = await api.jobStatus(job_id);
@@ -110,14 +124,42 @@ export function Upload({ ent, scan, upload, resetUpload }: {
           {mixes === null ? "Scanning your folders…"
             : `${mixes.length} mix(es) · ${newCount} new · ${selected.size} selected`}
         </div>
-        <label className="sub" style={{ margin: 0, display: "flex", gap: 8, alignItems: "center" }}>
-          Release as
-          <select value={sharing} onChange={(e) => setSharing(e.target.value as Sharing)}>
-            <option value="public">Public</option>
-            <option value="private">Private</option>
-          </select>
-        </label>
+        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+          {ent.features.metadata_templates && cfg.templates.length > 0 && (
+            <label className="sub" style={{ margin: 0, display: "flex", gap: 8, alignItems: "center" }}>
+              Template
+              <select value={templateName} onChange={(e) => setTemplateName(e.target.value)}>
+                <option value="">None</option>
+                {cfg.templates.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+              </select>
+            </label>
+          )}
+          <label className="sub" style={{ margin: 0, display: "flex", gap: 8, alignItems: "center", opacity: templateName ? 0.5 : 1 }}>
+            Release as
+            <select value={sharing} disabled={!!templateName}
+              onChange={(e) => setSharing(e.target.value as Sharing)}>
+              <option value="public">Public</option>
+              <option value="private">Private</option>
+            </select>
+          </label>
+        </div>
       </div>
+
+      {ent.features.schedule_release && (
+        <div className="row" style={{ marginBottom: 12 }}>
+          <label className="toolchk">
+            <input type="checkbox" checked={scheduleOn} onChange={(e) => setScheduleOn(e.target.checked)} />
+            Schedule public release
+          </label>
+          {scheduleOn && (
+            <input type="datetime-local" value={releaseAtValue}
+              onChange={(e) => setReleaseAtValue(e.target.value)} />
+          )}
+          {scheduleOn && (
+            <span className="row__sub">uploads private now, flips public at this time</span>
+          )}
+        </div>
+      )}
 
       {mixes && mixes.length === 0 && (
         <div className="empty"><div className="empty__icon">🎚️</div>No audio found in your watched folders.</div>

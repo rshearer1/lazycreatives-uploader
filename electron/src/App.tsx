@@ -83,7 +83,7 @@ export default function App() {
             {tab === "home" ? (
               <Home account={account} onAccount={setAccount} onUpload={() => setTab("upload")} />
             ) : tab === "upload" ? (
-              <Upload ent={ent} scan={live.scan} upload={live.upload} resetUpload={live.resetUpload} />
+              <Upload cfg={cfg} ent={ent} scan={live.scan} upload={live.upload} resetUpload={live.resetUpload} />
             ) : tab === "manage" ? (
               <Manage />
             ) : tab === "history" ? (

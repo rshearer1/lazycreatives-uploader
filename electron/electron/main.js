@@ -11,6 +11,17 @@ let tray = null;
 let isQuitting = false;
 let stopping = null;
 
+// Single-instance: a second launch must focus the running window, not spawn a
+// duplicate sidecar (which would fight over the same DB + the fixed OAuth port).
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+  });
+}
+
 function backendDir() {
   return isDev
     ? path.join(__dirname, "..", "..", "backend")
@@ -75,8 +86,18 @@ ipcMain.handle("open-external", (_e, url) => {
   if (typeof url === "string" && /^https?:\/\//.test(url)) shell.openExternal(url);
 });
 
+// Launch-at-login is opt-in (audit): the renderer reads/sets it; we never force it.
+ipcMain.handle("get-open-at-login", () => app.getLoginItemSettings().openAtLogin);
+ipcMain.handle("set-open-at-login", (_e, enabled) => {
+  app.setLoginItemSettings({ openAtLogin: !!enabled });
+  return app.getLoginItemSettings().openAtLogin;
+});
+
 app.whenReady().then(async () => {
   try {
+    if (!gotTheLock) return; // a primary instance is already running
+    // Windows taskbar identity + correctly-attributed notifications (audit).
+    if (process.platform === "win32") app.setAppUserModelId("com.lazycreatives.uploader");
     // SoundCloud sign-in opens in the user's real browser (not in-app), so the CSP
     // here only needs to allow the renderer to reach the localhost sidecar.
     if (app.isPackaged) {
@@ -110,7 +131,6 @@ app.whenReady().then(async () => {
       onShow: () => { if (win) win.show(); },
       onQuit: () => { isQuitting = true; app.quit(); },
     });
-    app.setLoginItemSettings({ openAtLogin: true });
   } catch (err) {
     dialog.showErrorBox("LazyCreatives Uploader couldn't start",
       "The upload engine failed to start.\n\n" +

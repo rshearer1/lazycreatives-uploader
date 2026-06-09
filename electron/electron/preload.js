@@ -11,4 +11,6 @@ contextBridge.exposeInMainWorld("lazyupload", {
   pickFolder: () => ipcRenderer.invoke("pick-folder"),
   revealPath: (target) => ipcRenderer.invoke("reveal-path", target),
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
+  getOpenAtLogin: () => ipcRenderer.invoke("get-open-at-login"),
+  setOpenAtLogin: (enabled) => ipcRenderer.invoke("set-open-at-login", enabled),
 });

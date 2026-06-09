@@ -120,14 +120,29 @@ cd electron && npm test                         # renderer
 | Dedupe (never double-post) | ✅ | ✅ |
 | Batch upload a whole folder | — | ✅ |
 | Watch-folder auto-upload | — | ✅ |
-| Scheduled public release | — | ✅ |
+| Scheduled public release (upload private, flip public later) | — | ✅ |
 | Multiple SoundCloud accounts | — | ✅ |
+| Saved metadata templates | — | ✅ |
 
 Licensing (`entitlement.py`) is a deliberate near-clone of the Backups tool's, so a
 future "buy tools separately / all-access subscription" dashboard can point both at
 one shared licensing service with minimal change.
 
+## Security notes
+
+- SoundCloud OAuth tokens are **encrypted at rest** (Windows DPAPI, bound to your
+  user account); the sidecar is localhost-only behind a per-launch auth token.
+- The renderer is hardened (context isolation, no node integration, navigation +
+  popups blocked, CSP when packaged).
+- **Client-secret caveat:** SoundCloud requires the client secret for token
+  exchange/refresh even with PKCE, so it is embedded in the distributed build and is
+  extractable. For production, route token exchange through a small hosted broker
+  (a natural job for the planned dashboard) so the secret never ships.
+
 ## Status
 
-Active development. Packaging (installers) wired via `electron-builder`; `npm start`
-runs it in dev. App icons are placeholders pending final brand art.
+Active development. App icons are generated from the brand mark by
+`brand/make_icons.py`. Packaging (installers) is wired via `electron-builder` but the
+PyInstaller sidecar build + code signing are not yet exercised; `npm start` runs it in
+dev. Behind the harness/IDE, launch needs `ELECTRON_RUN_AS_NODE` unset (handled by the
+`npm start` script).
