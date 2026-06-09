@@ -90,6 +90,11 @@ npm install
 npm start
 ```
 
+> **Behind a TLS-inspecting proxy / antivirus?** If `npm install` fails with
+> `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, Node isn't trusting your network's root CA.
+> Run npm with the Windows certificate store:
+> `NODE_OPTIONS=--use-system-ca npm install` (Node 22+).
+
 Headless CLI (handy for a dry run against the mock):
 
 ```bash
