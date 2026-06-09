@@ -1,6 +1,15 @@
-# LazyCreatives Uploader
+<p align="center">
+  <img src="https://raw.githubusercontent.com/LazyCreatives/.github/main/profile/logo.png" alt="Lazy Creatives — Uploader" width="380">
+</p>
 
-**Automatically publish your finished mixes to SoundCloud.**
+<h1 align="center">Lazy Creatives — Uploader</h1>
+
+<p align="center"><b>Automatically publish your finished mixes to SoundCloud — and manage your whole library.</b></p>
+
+<p align="center">
+  <a href="https://lazycreatives.github.io">Website</a> ·
+  <a href="https://github.com/LazyCreatives/lazycreatives-backups">Sibling tool: Backups</a>
+</p>
 
 Point it at the folder you bounce mixes into. It finds every new render, lets you
 publish with one click — or watches the folder and uploads automatically — and never
@@ -8,9 +17,11 @@ double-posts the same mix (de-duplicated by audio content hash, not filename). I
 **manages your existing SoundCloud tracks**: edit titles/tags/genre, flip public↔private,
 or delete — without leaving the app.
 
-A sibling to [LazyCreatives Backups](https://github.com/rshearer1/lazycreatives-backups):
-same Electron + Python/FastAPI sidecar architecture, same brand, same licensing model —
-built so both tools can sit behind one dashboard / subscription later.
+Part of [**Lazy Creatives**](https://lazycreatives.github.io) — tools that take the boring,
+behind-the-scenes work of making music off your plate. *Looks lazy. Works obsessively.*
+A sibling to [Backups](https://github.com/LazyCreatives/lazycreatives-backups): same
+Electron + Python/FastAPI sidecar, same brand, same licensing — built so both tools can
+sit behind one dashboard / subscription later.
 
 > Runs fully **offline in demo mode** with no SoundCloud account, so you can try the
 > entire flow before you have API credentials.
